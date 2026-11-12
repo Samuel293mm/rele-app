@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#111">
+<title>Relé ESP32</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  body{font-family:system-ui,sans-serif;padding:12px;background:#111;color:#eee;max-width:520px;margin:auto}
+  h1{font-size:1.2rem}
+  .card{background:#1c1c1c;border-radius:12px;padding:16px;margin-bottom:12px}
+  button{font-size:1.1rem;padding:14px 20px;border-radius:10px;border:0;cursor:pointer;margin:4px}
+  .on{background:#2e7d32;color:#fff}.off{background:#b71c1c;color:#fff}
+  .save{background:#1565c0;color:#fff;width:100%;margin-top:10px}
+  .state{font-size:2rem;margin:8px 0}
+  .row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap}
+  input[type=number]{width:70px;padding:6px;font-size:1rem}
+  .small{font-size:.85rem;color:#aaa}
+  .ok{color:#4caf50}.bad{color:#f44336}
+  hr{border:0;border-top:1px solid #333;margin:10px 0}
+</style>
+</head>
+<body>
+<h1>Control Relé ESP32</h1>
+
+<div class="card">
+  <div>Conexión: <span id="conn" class="bad">Desconectado</span></div>
+  <div class="state" id="relayState">--</div>
+  <div class="small" id="originInfo">Origen: --</div>
+  <div class="row">
+    <button class="on"  onclick="manual(1)">ENCENDER</button>
+    <button class="off" onclick="manual(0)">APAGAR</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="font-size:1rem;margin-top:0">Temporizadores</h2>
+  <div id="timers"></div>
+  <button class="save" onclick="saveTimers()">Guardar todo</button>
+  <div class="small" id="ack" style="margin-top:6px"></div>
+</div>
+
+<script>
+// ============ EDITA SOLO ESTO ============
+const MQTT_URL  = "wss://test.mosquitto.org:8081/mqtt";
+const MQTT_USER = "";
+const MQTT_PASS = "";
+const DEVICE_ID = "esp32-caracas-pq1sgs";   // <--- TU ID AQUÍ
+// ========================================
+
+const TOPIC_BASE = "relay/" + DEVICE_ID;
+const MAX_TIMERS = 4;
+let timers = Array.from({length:MAX_TIMERS}, (_,i) => ({
+  id:i, enabled:false, days:[], startHour:7, startMin:0, durationMin:60
+}));
+let client;
+
+function connect() {
+  client = mqtt.connect(MQTT_URL, {
+    username: MQTT_USER, password: MQTT_PASS,
+    clientId: "app-" + Math.random().toString(16).slice(2,8),
+    clean: true, reconnectPeriod: 3000
+  });
+  client.on("connect", () => {
+    setConn("Conectado", "ok");
+    client.subscribe(TOPIC_BASE + "/estado");
+    client.subscribe(TOPIC_BASE + "/schedule/ack");
+  });
+  client.on("close", () => setConn("Desconectado","bad"));
+  client.on("reconnect", () => setConn("Reconectando...","bad"));
+  client.on("error", (e) => console.log("MQTT error:", e));
+  client.on("message", (topic, payload) => {
+    const txt = payload.toString();
+    if (topic.endsWith("/estado")) {
+      try {
+        const j = JSON.parse(txt);
+        document.getElementById("relayState").textContent = j.relay ? "ENCENDIDO" : "APAGADO";
+        document.getElementById("relayState").style.color = j.relay ? "#4caf50" : "#f44336";
+        let info = "Origen: " + (j.origin || "--");
+        if (j.onUntil && j.onUntil > 0) {
+          const d = new Date(j.onUntil * 1000);
+          info += "  ·  apaga a las " + d.toTimeString().slice(0,5);
+        }
+        document.getElementById("originInfo").textContent = info;
+      } catch(e){}
+    }
+    if (topic.endsWith("/schedule/ack")) {
+      document.getElementById("ack").textContent = "Servidor respondió: " + txt;
+    }
+  });
+}
+function setConn(text, cls) {
+  const el = document.getElementById("conn");
+  el.textContent = text; el.className = cls;
+}
+function manual(v) {
+  if (!client || !client.connected) return alert("Sin conexión al broker");
+  client.publish(TOPIC_BASE + "/relay/cmd", JSON.stringify({ relay: v }));
+}
+function saveTimers() {
+  if (!client || !client.connected) return alert("Sin conexión al broker");
+  client.publish(TOPIC_BASE + "/schedule", JSON.stringify({ timers: timers.filter(t => t.enabled) }));
+  document.getElementById("ack").textContent = "Enviado, esperando ack...";
+}
+function toggleDay(i, d, checked) {
+  if (checked) { if (!timers[i].days.includes(d)) timers[i].days.push(d); }
+  else { timers[i].days = timers[i].days.filter(x => x !== d); }
+}
+function renderTimers() {
+  const cont = document.getElementById("timers");
+  cont.innerHTML = "";
+  timers.forEach((t, i) => {
+    const div = document.createElement("div");
+    div.innerHTML = `
+      <div class="row">
+        <label><input type="checkbox" ${t.enabled?"checked":""} onchange="timers[${i}].enabled=this.checked"> Temporizador ${i+1}</label>
+      </div>
+      <div class="row">
+        ${["D","L","M","X","J","V","S"].map((d,di) =>
+          `<label><input type="checkbox" ${t.days.includes(di)?"checked":""}
+            onchange="toggleDay(${i},${di},this.checked)">${d}</label>`).join("")}
+      </div>
+      <div class="row">
+        Hora: <input type="number" min="0" max="23" value="${t.startHour}"
+          onchange="timers[${i}].startHour=+this.value">
+        : <input type="number" min="0" max="59" value="${t.startMin}"
+          onchange="timers[${i}].startMin=+this.value">
+        &nbsp;Duración (min): <input type="number" min="1" max="1440" value="${t.durationMin}"
+          onchange="timers[${i}].durationMin=+this.value">
+      </div>
+      <hr>
+    `;
+    cont.appendChild(div);
+  });
+}
+renderTimers();
+connect();
+</script>
+</body>
+</html>
