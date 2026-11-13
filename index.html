@@ -2,43 +2,92 @@
 <html lang="es">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#111">
-<title>Relé ESP32</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#0f172a">
+<title>Control Relé ESP32</title>
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <style>
-  body{font-family:system-ui,sans-serif;padding:12px;background:#111;color:#eee;max-width:520px;margin:auto}
-  h1{font-size:1.2rem}
-  .card{background:#1c1c1c;border-radius:12px;padding:16px;margin-bottom:12px}
-  button{font-size:1.1rem;padding:14px 20px;border-radius:10px;border:0;cursor:pointer;margin:4px}
-  .on{background:#2e7d32;color:#fff}.off{background:#b71c1c;color:#fff}
-  .save{background:#1565c0;color:#fff;width:100%;margin-top:10px}
-  .state{font-size:2rem;margin:8px 0}
-  .row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap}
-  input[type=number]{width:70px;padding:6px;font-size:1rem}
-  .small{font-size:.85rem;color:#aaa}
-  .ok{color:#4caf50}.bad{color:#f44336}
-  hr{border:0;border-top:1px solid #333;margin:10px 0}
+  :root {
+    --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --text-muted: #94a3b8;
+    --primary: #3b82f6; --success: #22c55e; --danger: #ef4444;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background-color: var(--bg); color: var(--text); margin: 0; padding: 20px;
+    display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+  }
+  .container { width: 100%; max-width: 450px; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  h1 { font-size: 1.4rem; margin: 0; font-weight: 600; }
+  .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--danger); margin-right: 5px; transition: 0.3s; }
+  .status-dot.connected { background: var(--success); box-shadow: 0 0 8px var(--success); }
+  
+  .card { background: var(--card); border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); }
+  
+  .state-display { text-align: center; margin: 10px 0 20px 0; }
+  .state-text { font-size: 2.5rem; font-weight: 800; letter-spacing: 2px; margin: 0; transition: 0.3s; }
+  .state-text.on { color: var(--success); text-shadow: 0 0 15px rgba(34, 197, 94, 0.3); }
+  .state-text.off { color: var(--danger); }
+  .origin { font-size: 0.85rem; color: var(--text-muted); margin-top: 5px; }
+
+  .btn-row { display: flex; gap: 12px; }
+  button {
+    flex: 1; padding: 16px; border: none; border-radius: 12px; font-size: 1.1rem;
+    font-weight: 600; cursor: pointer; transition: transform 0.1s, opacity 0.2s; color: white;
+  }
+  button:active { transform: scale(0.95); }
+  .btn-on { background: var(--success); box-shadow: 0 4px 12px rgba(34, 197, 94, 0.2); }
+  .btn-off { background: var(--danger); box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2); }
+  .btn-save { background: var(--primary); width: 100%; margin-top: 15px; font-size: 1rem; box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2); }
+
+  .timer-item { border-bottom: 1px solid #334155; padding-bottom: 15px; margin-bottom: 15px; }
+  .timer-item:last-child { border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
+  .timer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .timer-header label { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--primary); }
+  
+  .days-row { display: flex; justify-content: space-between; margin-bottom: 15px; background: #0f172a; padding: 10px; border-radius: 8px; }
+  .days-row label { display: flex; flex-direction: column; align-items: center; font-size: 0.75rem; color: var(--text-muted); gap: 5px; cursor: pointer; }
+  .days-row input { accent-color: var(--primary); width: 16px; height: 16px; }
+
+  .time-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .time-group { display: flex; align-items: center; gap: 5px; background: #0f172a; padding: 8px 12px; border-radius: 8px; }
+  .time-group input, .time-group select { background: transparent; border: none; color: white; font-size: 1rem; font-weight: 600; outline: none; }
+  .time-group input[type="number"] { width: 45px; text-align: center; }
+  .time-group select { cursor: pointer; }
+  
+  .duration-group { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; color: var(--text-muted); }
+  .duration-group input { background: #0f172a; border: none; color: white; padding: 8px; border-radius: 8px; width: 60px; text-align: center; font-weight: 600; }
+  
+  .ack-msg { font-size: 0.85rem; color: var(--text-muted); text-align: center; margin-top: 10px; min-height: 20px; }
 </style>
 </head>
 <body>
-<h1>Control Relé ESP32</h1>
 
-<div class="card">
-  <div>Conexión: <span id="conn" class="bad">Desconectado</span></div>
-  <div class="state" id="relayState">--</div>
-  <div class="small" id="originInfo">Origen: --</div>
-  <div class="row">
-    <button class="on"  onclick="manual(1)">ENCENDER</button>
-    <button class="off" onclick="manual(0)">APAGAR</button>
+<div class="container">
+  <header>
+    <h1>Control Relé</h1>
+    <div style="font-size: 0.85rem; color: var(--text-muted);"><span id="connDot" class="status-dot"></span> <span id="connText">Desconectado</span></div>
+  </header>
+
+  <div class="card">
+    <div class="state-display">
+      <h2 id="relayState" class="state-text off">--</h2>
+      <div class="origin" id="originInfo">Origen: --</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-on" onclick="manual(1)">ENCENDER</button>
+      <button class="btn-off" onclick="manual(0)">APAGAR</button>
+    </div>
   </div>
-</div>
 
-<div class="card">
-  <h2 style="font-size:1rem;margin-top:0">Temporizadores</h2>
-  <div id="timers"></div>
-  <button class="save" onclick="saveTimers()">Guardar todo</button>
-  <div class="small" id="ack" style="margin-top:6px"></div>
+  <div class="card">
+    <h3 style="margin-top:0; margin-bottom:15px; font-size:1.1rem; font-weight:600;">Temporizadores</h3>
+    <div id="timers"></div>
+    <button class="btn-save" onclick="saveTimers()">Guardar Temporizadores</button>
+    <div class="ack-msg" id="ack"></div>
+  </div>
 </div>
 
 <script>
@@ -46,7 +95,7 @@
 const MQTT_URL  = "wss://test.mosquitto.org:8081/mqtt";
 const MQTT_USER = "";
 const MQTT_PASS = "";
-const DEVICE_ID = "esp32-caracas-pq1sgs";   // <--- TU ID AQUÍ
+const DEVICE_ID = "esp32-caracas-pq1sgs"; // <--- TU ID
 // ========================================
 
 const TOPIC_BASE = "relay/" + DEVICE_ID;
@@ -62,78 +111,118 @@ function connect() {
     clientId: "app-" + Math.random().toString(16).slice(2,8),
     clean: true, reconnectPeriod: 3000
   });
+  
   client.on("connect", () => {
-    setConn("Conectado", "ok");
+    document.getElementById("connDot").classList.add("connected");
+    document.getElementById("connText").textContent = "Conectado";
     client.subscribe(TOPIC_BASE + "/estado");
     client.subscribe(TOPIC_BASE + "/schedule/ack");
   });
-  client.on("close", () => setConn("Desconectado","bad"));
-  client.on("reconnect", () => setConn("Reconectando...","bad"));
-  client.on("error", (e) => console.log("MQTT error:", e));
+  
+  client.on("close", () => {
+    document.getElementById("connDot").classList.remove("connected");
+    document.getElementById("connText").textContent = "Desconectado";
+  });
+
   client.on("message", (topic, payload) => {
     const txt = payload.toString();
     if (topic.endsWith("/estado")) {
       try {
         const j = JSON.parse(txt);
-        document.getElementById("relayState").textContent = j.relay ? "ENCENDIDO" : "APAGADO";
-        document.getElementById("relayState").style.color = j.relay ? "#4caf50" : "#f44336";
+        const el = document.getElementById("relayState");
+        el.textContent = j.relay ? "ENCENDIDO" : "APAGADO";
+        el.className = "state-text " + (j.relay ? "on" : "off");
+        
         let info = "Origen: " + (j.origin || "--");
         if (j.onUntil && j.onUntil > 0) {
           const d = new Date(j.onUntil * 1000);
-          info += "  ·  apaga a las " + d.toTimeString().slice(0,5);
+          info += "  ·  apaga a las " + d.toLocaleTimeString('es-VE', {hour: '2-digit', minute:'2-digit'});
         }
         document.getElementById("originInfo").textContent = info;
       } catch(e){}
     }
     if (topic.endsWith("/schedule/ack")) {
-      document.getElementById("ack").textContent = "Servidor respondió: " + txt;
+      document.getElementById("ack").textContent = "Respuesta: " + txt;
+      setTimeout(() => document.getElementById("ack").textContent = "", 3000);
     }
   });
 }
-function setConn(text, cls) {
-  const el = document.getElementById("conn");
-  el.textContent = text; el.className = cls;
-}
+
 function manual(v) {
   if (!client || !client.connected) return alert("Sin conexión al broker");
   client.publish(TOPIC_BASE + "/relay/cmd", JSON.stringify({ relay: v }));
 }
+
 function saveTimers() {
   if (!client || !client.connected) return alert("Sin conexión al broker");
-  client.publish(TOPIC_BASE + "/schedule", JSON.stringify({ timers: timers.filter(t => t.enabled) }));
-  document.getElementById("ack").textContent = "Enviado, esperando ack...";
+  
+  // Convertir UI a formato 24h antes de enviar
+  const payloadTimers = timers.filter(t => t.enabled).map(t => {
+    let h24 = parseInt(t.uiHour);
+    if (t.uiAmPm === "PM" && h24 !== 12) h24 += 12;
+    if (t.uiAmPm === "AM" && h24 === 12) h24 = 0;
+    
+    return {
+      id: t.id, enabled: t.enabled, days: t.days,
+      startHour: h24, startMin: parseInt(t.uiMin), durationMin: parseInt(t.uiDuration)
+    };
+  });
+
+  client.publish(TOPIC_BASE + "/schedule", JSON.stringify({ timers: payloadTimers }));
+  document.getElementById("ack").textContent = "Enviado, esperando respuesta...";
 }
+
+function updateTime(i, field, val) {
+  timers[i][field] = val;
+}
+
 function toggleDay(i, d, checked) {
   if (checked) { if (!timers[i].days.includes(d)) timers[i].days.push(d); }
   else { timers[i].days = timers[i].days.filter(x => x !== d); }
 }
+
 function renderTimers() {
   const cont = document.getElementById("timers");
   cont.innerHTML = "";
   timers.forEach((t, i) => {
-    const div = document.createElement("div");
-    div.innerHTML = `
-      <div class="row">
-        <label><input type="checkbox" ${t.enabled?"checked":""} onchange="timers[${i}].enabled=this.checked"> Temporizador ${i+1}</label>
+    // Inicializar UI en formato 12h
+    if (!t.uiHour) {
+      t.uiHour = t.startHour % 12 || 12;
+      t.uiAmPm = t.startHour >= 12 ? "PM" : "AM";
+      t.uiMin = String(t.startMin).padStart(2, '0');
+      t.uiDuration = t.durationMin;
+    }
+
+    const html = `
+      <div class="timer-item">
+        <div class="timer-header">
+          <label><input type="checkbox" ${t.enabled?"checked":""} onchange="timers[${i}].enabled=this.checked"> Temporizador ${i+1}</label>
+        </div>
+        <div class="days-row">
+          ${["D","L","M","X","J","V","S"].map((d,di) =>
+            `<label><input type="checkbox" ${t.days.includes(di)?"checked":""} onchange="toggleDay(${i},${di},this.checked)">${d}</label>`).join("")}
+        </div>
+        <div class="time-row">
+          <div class="time-group">
+            <input type="number" min="1" max="12" value="${t.uiHour}" onchange="updateTime(${i}, 'uiHour', this.value)">
+            <span>:</span>
+            <input type="number" min="0" max="59" value="${t.uiMin}" onchange="updateTime(${i}, 'uiMin', this.value)">
+            <select onchange="updateTime(${i}, 'uiAmPm', this.value)">
+              <option value="AM" ${t.uiAmPm==="AM"?"selected":""}>AM</option>
+              <option value="PM" ${t.uiAmPm==="PM"?"selected":""}>PM</option>
+            </select>
+          </div>
+          <div class="duration-group">
+            <span>Dur:</span>
+            <input type="number" min="1" max="1440" value="${t.uiDuration}" onchange="updateTime(${i}, 'uiDuration', this.value)"> min
+          </div>
+        </div>
       </div>
-      <div class="row">
-        ${["D","L","M","X","J","V","S"].map((d,di) =>
-          `<label><input type="checkbox" ${t.days.includes(di)?"checked":""}
-            onchange="toggleDay(${i},${di},this.checked)">${d}</label>`).join("")}
-      </div>
-      <div class="row">
-        Hora: <input type="number" min="0" max="23" value="${t.startHour}"
-          onchange="timers[${i}].startHour=+this.value">
-        : <input type="number" min="0" max="59" value="${t.startMin}"
-          onchange="timers[${i}].startMin=+this.value">
-        &nbsp;Duración (min): <input type="number" min="1" max="1440" value="${t.durationMin}"
-          onchange="timers[${i}].durationMin=+this.value">
-      </div>
-      <hr>
     `;
-    cont.appendChild(div);
+    cont.innerHTML += html;
   });
 }
+
 renderTimers();
 connect();
 </script>
