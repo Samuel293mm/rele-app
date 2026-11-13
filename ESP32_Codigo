@@ -1,0 +1,256 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <Preferences.h>
+#include <ArduinoJson.h>
+#include <time.h>
+
+// =================== CONFIGURACIÓN ===================
+const char* WIFI_SSID   = "1001";     // <--- CAMBIA ESTO
+const char* WIFI_PASS   = "10987654321";     // <--- CAMBIA ESTO
+
+const char* MQTT_HOST   = "broker.hivemq.com";
+const int   MQTT_PORT   = 8883;
+const char* MQTT_USER   = "";
+const char* MQTT_PASS   = "";
+
+const char* DEVICE_ID   = "esp32-caracas-pq1sgs"; // <--- TU ID
+const int   RELAY_PIN   = 2;   // GPIO 2 = LED interno
+const bool  RELAY_ACTIVE_LOW = true; // El LED interno suele encender con LOW
+// ======================================================
+
+const long  TZ_OFFSET_SEC = -4L * 3600L; // Venezuela UTC-4
+const int   MAX_TIMERS    = 4;
+const unsigned long CHECK_INTERVAL_MS = 15000;
+
+struct Timer {
+  bool     enabled;
+  uint8_t  days;
+  uint8_t  startHour;
+  uint8_t  startMin;
+  uint16_t durationMin;
+};
+Timer timers[MAX_TIMERS];
+
+int      relayState      = 0;
+uint32_t onUntilEpoch    = 0;
+char     lastFireKey[20] = "";
+char     lastOrigin[16]  = "boot";
+
+WiFiClientSecure net;
+PubSubClient mqtt(net);
+Preferences prefs;
+
+String topicBase, topicEstado, topicCmd, topicSchedule, topicScheduleAck, topicOnline;
+
+void buildTopics() {
+  topicBase        = String("relay/") + DEVICE_ID;
+  topicEstado      = topicBase + "/estado";
+  topicCmd         = topicBase + "/relay/cmd";
+  topicSchedule    = topicBase + "/schedule";
+  topicScheduleAck = topicBase + "/schedule/ack";
+  topicOnline      = topicBase + "/online";
+}
+
+void saveState() {
+  prefs.begin("sched", false);
+  prefs.putBytes("timers", timers, sizeof(timers));
+  prefs.putInt("relay", relayState);
+  prefs.putUInt("onUntil", onUntilEpoch);
+  prefs.putString("lastFire", lastFireKey);
+  prefs.putString("origin", lastOrigin);
+  prefs.end();
+}
+
+void loadState() {
+  prefs.begin("sched", true);
+  prefs.getBytes("timers", timers, sizeof(timers));
+  relayState   = prefs.getInt("relay", 0);
+  onUntilEpoch = prefs.getUInt("onUntil", 0);
+  String lf    = prefs.getString("lastFire", "");
+  String og    = prefs.getString("origin", "boot");
+  strncpy(lastFireKey, lf.c_str(), sizeof(lastFireKey)-1);
+  strncpy(lastOrigin, og.c_str(), sizeof(lastOrigin)-1);
+  prefs.end();
+}
+
+void applyRelayPin() {
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW
+      ? (relayState ? LOW : HIGH)
+      : (relayState ? HIGH : LOW));
+}
+
+void publishEstado() {
+  StaticJsonDocument<256> doc;
+  doc["relay"]   = relayState;
+  doc["origin"]  = lastOrigin;
+  doc["ts"]      = (uint32_t) time(nullptr);
+  doc["onUntil"] = onUntilEpoch;
+  char buf[256];
+  serializeJson(doc, buf, sizeof(buf));
+  mqtt.publish(topicEstado.c_str(), buf, true);
+}
+
+void setRelay(int v, const char* origin) {
+  relayState = v;
+  strncpy(lastOrigin, origin, sizeof(lastOrigin)-1);
+  applyRelayPin();
+  saveState();
+  publishEstado();
+  Serial.printf("[LED] %d origin=%s onUntil=%u\n", relayState, lastOrigin, onUntilEpoch);
+}
+
+void handleSchedule(const String& payload) {
+  StaticJsonDocument<1024> doc;
+  if (deserializeJson(doc, payload)) {
+    mqtt.publish(topicScheduleAck.c_str(), "{\"ok\":false,\"err\":\"json\"}");
+    return;
+  }
+  for (int i = 0; i < MAX_TIMERS; i++) timers[i].enabled = false;
+  for (JsonObject t : doc["timers"].as<JsonArray>()) {
+    int id = t["id"] | -1;
+    if (id < 0 || id >= MAX_TIMERS) continue;
+    timers[id].enabled     = t["enabled"]     | false;
+    timers[id].startHour   = t["startHour"]   | 0;
+    timers[id].startMin    = t["startMin"]    | 0;
+    timers[id].durationMin = t["durationMin"] | 30;
+    uint8_t mask = 0;
+    for (int d : t["days"].as<JsonArray>()) {
+      if (d >= 0 && d <= 6) mask |= (1 << d);
+    }
+    timers[id].days = mask;
+  }
+  saveState();
+  mqtt.publish(topicScheduleAck.c_str(), "{\"ok\":true}");
+  Serial.println("[SCHEDULE] actualizado");
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int len) {
+  String t(topic);
+  String p((const char*)payload, len);
+  Serial.printf("[MQTT] %s -> %s\n", topic, p.c_str());
+  
+  if (t == topicCmd) {
+    StaticJsonDocument<128> doc;
+    if (deserializeJson(doc, p)) return;
+    int r = doc["relay"] | -1;
+    if (r == 1) { onUntilEpoch = 0; setRelay(1, "manual"); }
+    if (r == 0) { onUntilEpoch = 0; setRelay(0, "manual"); }
+  } else if (t == topicSchedule) {
+    handleSchedule(p);
+  }
+}
+
+void ensureWifi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  Serial.printf("[WiFi] conectando a %s...\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) delay(250);
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("[WiFi] OK IP=%s\n", WiFi.localIP().toString().c_str());
+    configTime(TZ_OFFSET_SEC, 0, "pool.ntp.org", "time.nist.gov");
+  } else {
+    Serial.println("[WiFi] FALLO, reintentando");
+  }
+}
+
+void ensureMqtt() {
+  if (mqtt.connected()) return;
+  String cid = String(DEVICE_ID) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+  Serial.println("[MQTT] conectando...");
+  
+  bool ok = mqtt.connect(cid.c_str(), MQTT_USER, MQTT_PASS,
+                   topicOnline.c_str(), 1, true, "{\"online\":false}");
+                   
+  if (ok) {
+    Serial.println("[MQTT] OK");
+    mqtt.publish(topicOnline.c_str(), "{\"online\":true}", true);
+    mqtt.subscribe(topicCmd.c_str(), 1);
+    mqtt.subscribe(topicSchedule.c_str(), 1);
+    publishEstado();
+  } else {
+    Serial.printf("[MQTT] FALLO rc=%d\n", mqtt.state());
+  }
+}
+
+void checkSchedule() {
+  struct tm ti;
+  if (!getLocalTime(&ti, 1000)) return;
+
+  time_t epoch = time(nullptr);
+  char key[20];
+  snprintf(key, sizeof(key), "%04d%02d%02d%02d%02d",
+           ti.tm_year+1900, ti.tm_mon+1, ti.tm_mday, ti.tm_hour, ti.tm_min);
+
+  for (int i = 0; i < MAX_TIMERS; i++) {
+    Timer& t = timers[i];
+    if (!t.enabled) continue;
+    if (!(t.days & (1 << ti.tm_wday))) continue;
+    if (ti.tm_hour != t.startHour || ti.tm_min != t.startMin) continue;
+    if (strcmp(key, lastFireKey) == 0) continue;
+
+    uint32_t until = (uint32_t) epoch + (uint32_t) t.durationMin * 60u;
+    if (until > onUntilEpoch) onUntilEpoch = until;
+
+    char org[16];
+    snprintf(org, sizeof(org), "timer%d", i);
+    setRelay(1, org);
+
+    strncpy(lastFireKey, key, sizeof(lastFireKey)-1);
+    saveState();
+  }
+
+  if (onUntilEpoch != 0 && (uint32_t) epoch >= onUntilEpoch) {
+    onUntilEpoch = 0;
+    setRelay(0, "timer");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n=== ESP32 Relay Scheduler (LED interno) ===");
+
+  pinMode(RELAY_PIN, OUTPUT);
+  loadState();
+  applyRelayPin();
+  buildTopics();
+
+  ensureWifi();
+  
+  // Sincronizar hora
+  struct tm ti; int tries = 0;
+  while (!getLocalTime(&ti, 1000) && tries < 10) tries++;
+  if (tries < 10) Serial.printf("[NTP] hora local: %02d:%02d\n", ti.tm_hour, ti.tm_min);
+
+  net.setInsecure(); // Solo para test.mosquitto.org
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  mqtt.setCallback(mqttCallback);
+  mqtt.setKeepAlive(30);
+  mqtt.setSocketTimeout(10);
+
+  ensureMqtt();
+
+  if (onUntilEpoch != 0 && (uint32_t) time(nullptr) >= onUntilEpoch) {
+    onUntilEpoch = 0;
+    relayState = 0;
+    strncpy(lastOrigin, "boot", sizeof(lastOrigin)-1);
+    applyRelayPin();
+    saveState();
+  }
+  publishEstado();
+}
+
+void loop() {
+  ensureWifi();
+  ensureMqtt();
+  mqtt.loop();
+
+  static unsigned long lastCheck = 0;
+  if (millis() - lastCheck >= CHECK_INTERVAL_MS) {
+    lastCheck = millis();
+    checkSchedule();
+  }
+}
